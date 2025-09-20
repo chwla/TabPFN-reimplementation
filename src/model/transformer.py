@@ -28,9 +28,9 @@ class TransformerTabPFN(nn.Module):
     """
     Minimal Transformer encoder that reads packed tokens and predicts labels/values at query positions.
     Input: tokens (B, T, D_in) where last dims include features + (label onehot or scalar) + known_flag.
-    Output heads:
+    Output:
       - classification: logits (B, T, C)
-      - regression: value (B, T)
+      - regression:     values (B, T)
     """
     def __init__(
         self,
@@ -67,13 +67,21 @@ class TransformerTabPFN(nn.Module):
 
     def forward(self, tokens: torch.Tensor, attn_mask: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
-        tokens: (B, T, D_in)
-        attn_mask: (B, T) True for valid tokens (key padding mask)
+        tokens:    (B, T, D_in)
+        attn_mask: (B, T) True for valid tokens (non-pad)
         """
         h = self.inp(tokens)
         h = self.pos(h)
-        # Transformer expects key_padding_mask where True = pad. We have True = valid, so invert.
-        key_padding_mask = ~attn_mask  # (B, T) True where we want to mask out
+
+        # MPS (Apple GPU) workaround: skip key_padding_mask to avoid unsupported op.
+        if tokens.device.type == "mps":
+            # Zero padded positions so they contribute minimally.
+            h = h * attn_mask.unsqueeze(-1).to(h.dtype)
+            key_padding_mask = None
+        else:
+            # PyTorch expects True where positions are PAD (to mask). We have True for VALID → invert.
+            key_padding_mask = ~attn_mask  # (B, T) True = pad
+
         h = self.enc(h, src_key_padding_mask=key_padding_mask)  # (B, T, d_model)
         out = self.head(h)  # (B, T, C) or (B, T, 1)
         if self.task_type == "reg":
