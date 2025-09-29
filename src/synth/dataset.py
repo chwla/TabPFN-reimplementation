@@ -62,11 +62,9 @@ class TabPFNConfig:
         self.difficulty = difficulty
         profile = DIFFICULTY_PROFILES[self.difficulty]
 
-        # First, copy all profile attributes directly
         for key, value in profile.items():
             setattr(self, key, value)
 
-        # Second, unpack any top-level _range tuples into specific values
         for key, value in profile.items():
             if isinstance(value, dict):
                 continue
@@ -77,7 +75,6 @@ class TabPFNConfig:
                 else:
                     setattr(self, key.replace('_range', ''), self.rng.uniform(*value))
         
-        # Add the missing logic to determine if the task is classification
         self.is_classification = self.rng.rand() < self.target_type_prob['classification']
 
     def to_dict(self) -> Dict[str, Any]:
@@ -242,16 +239,20 @@ def apply_postprocessing(X_raw, y_raw, config):
 
     if config.rng.rand() < config.warp_prob:
         for col in X.select_dtypes(include=np.number).columns:
-            u = minmax_scale(X[col]); a, b = config.rng.uniform(0.5, 5.0, 2)
-            with np.errstate(invalid='ignore'):
-                 X[col] = (1-(1-u+1e-6)**(1/b))**(1/a)*(X[col].max()-X[col].min())+X[col].min()
+            # FIX: Add safety check for columns with no variance
+            if X[col].nunique() > 1:
+                u = minmax_scale(X[col]); a, b = config.rng.uniform(0.5, 5.0, 2)
+                with np.errstate(invalid='ignore'):
+                     X[col] = (1-(1-u+1e-6)**(1/b))**(1/a)*(X[col].max()-X[col].min())+X[col].min()
 
     n_cat = int(config.n_features * config.categorical_frac)
     for col in config.rng.choice(X.columns, n_cat, replace=False):
         try:
-            X[col] = pd.qcut(X[col], q=config.rng.randint(2,20), labels=False, duplicates='drop')
-            cats = [''.join(config.rng.choice(list(string.ascii_lowercase),k=5)) for _ in range(int(X[col].max()+1))]
-            X[col] = X[col].apply(lambda x: cats[int(x)] if pd.notna(x) else x)
+            # FIX: Add safety check for discretization
+            if X[col].nunique() > 1:
+                X[col] = pd.qcut(X[col], q=config.rng.randint(2,20), labels=False, duplicates='drop')
+                cats = [''.join(config.rng.choice(list(string.ascii_lowercase),k=5)) for _ in range(int(X[col].max()+1))]
+                X[col] = X[col].apply(lambda x: cats[int(x)] if pd.notna(x) else x)
         except: pass
 
     X.loc[config.rng.rand(*X.shape) < config.missing_fraction] = np.nan
@@ -266,15 +267,14 @@ def apply_postprocessing(X_raw, y_raw, config):
 
     # Finalize target
     if config.is_classification:
-        # Corrected line: Wrap the output of qcut in a pd.Series to use .fillna()
         binned_y = pd.qcut(y_raw, q=config.n_classes, labels=False, duplicates='drop')
         y = pd.Series(binned_y).fillna(0).astype(int)
     else:
         y = y_raw
         
-    # Final cleanup of any potential NaNs from processing steps
+    # FIX: Make the final fillna more robust by chaining a fillna(0)
     if X.isnull().values.any():
-        X = X.fillna(X.median(numeric_only=True))
+        X = X.fillna(X.median(numeric_only=True)).fillna(0)
         
     return X, pd.Series(y, name='target')
 
